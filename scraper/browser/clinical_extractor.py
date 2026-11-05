@@ -1,0 +1,570 @@
+from pathlib import Path
+from urllib.parse import urljoin
+from playwright.async_api import (
+    Page,
+    Frame,
+    TimeoutError as PlaywrightTimeoutError,
+)
+
+
+class ClinicalExtractor:
+
+    BASE_URL = "http://10.0.0.80:8082/Hosvital/servlet"
+
+    DEFAULT_TIMEOUT = 15000
+
+    def __init__(self, page: Page):
+        self.page = page
+        self.page.set_default_timeout(self.DEFAULT_TIMEOUT)
+
+    # --------------------------------------------------
+    # MÉTODOS AUXILIARES
+    # --------------------------------------------------
+
+    def get_frame(self, name: str) -> Frame:
+        """
+        Obtiene un frame por su nombre.
+        """
+        frame = self.page.frame(name=name)
+
+        if frame is None:
+            raise Exception(f"No se encontró el frame: {name}")
+
+        return frame
+
+    async def wait_for_frame(self, name: str, timeout: int = 15000) -> Frame:
+        """
+        Espera hasta que exista un frame.
+        """
+
+        await self.page.wait_for_function(
+            """(name) => {
+                return Array.from(window.frames)
+                    .some(frame => frame.name === name);
+            }""",
+            arg=name,
+            timeout=timeout,
+        )
+
+        return self.get_frame(name)
+
+    # --------------------------------------------------
+    # ABRIR SISTEMA
+    # --------------------------------------------------
+
+    async def open_system(self):
+        """
+        Abre el sistema hospitalario.
+        """
+
+        await self.page.goto(f"{self.BASE_URL}/login", wait_until="domcontentloaded")
+
+        await self.page.locator("#vUSUARIO1").wait_for(state="visible")
+
+    # --------------------------------------------------
+    # LOGIN
+    # --------------------------------------------------
+
+    async def login(self, username: str, password: str):
+        """
+        Inicio de sesión robusto.
+        """
+
+        usuario = self.page.locator("#vUSUARIO1")
+        contrasena = self.page.locator("#vCONTRASENA")
+        sede = self.page.locator("#vSEDENOM")
+
+        # Esperar campos visibles
+        await usuario.wait_for(state="visible")
+        await contrasena.wait_for(state="visible")
+        await sede.wait_for(state="visible")
+
+        # Limpiar y diligenciar usuario
+        await usuario.fill("")
+        await usuario.fill(username)
+
+        # Verificar usuario
+        if await usuario.input_value() != username:
+            raise ValueError("El usuario no se diligenció correctamente")
+
+        # Limpiar y diligenciar contraseña
+        await contrasena.fill("")
+        await contrasena.fill(password)
+
+        # Verificar contraseña
+        if await contrasena.input_value() != password:
+            raise ValueError("La contraseña no se diligenció correctamente")
+
+        # Seleccionar sede
+        await sede.select_option("1")
+
+        # Verificar que los campos no hayan intercambiado sus valores
+        usuario_actual = await usuario.input_value()
+        contrasena_actual = await contrasena.input_value()
+
+        if usuario_actual != username or contrasena_actual != password:
+            raise ValueError("Los campos de autenticación tienen valores incorrectos")
+
+        # Ingresar
+        boton = self.page.locator(
+            'input[type="button"][value="Ingresar"]'
+        )
+
+        await boton.click()
+
+        # Esperar menú principal
+        await self.wait_for_frame('menu"', timeout=30000)
+
+        print("Login completado")
+
+    # --------------------------------------------------
+    # NAVEGACIÓN A RESUMEN
+    # --------------------------------------------------
+
+    async def open_summary(self):
+        """
+        Ingresa al módulo RESUMEN.
+        """
+
+        menu_frame = await self.wait_for_frame('menu"')
+
+        menu_resumen = menu_frame.get_by_text("RESUMEN", exact=True)
+
+        await menu_resumen.wait_for(state="visible")
+        await menu_resumen.click()
+
+        # Esperar a que el frame contenido cargue RESUMEN.
+        await self.page.wait_for_function(
+            """() => {
+                const frame = Array.from(window.frames)
+                    .find(f => f.name === "contenido");
+
+                return frame &&
+                    frame.location.href.includes("RESUMEN");
+            }""",
+            timeout=30000,
+        )
+
+        frame_contenido = self.get_frame("contenido")
+
+        await frame_contenido.get_by_text("CONSULTA DE HISTORIA", exact=True).wait_for(
+            state="visible"
+        )
+
+        print("Módulo RESUMEN abierto")
+
+        return frame_contenido
+
+    # --------------------------------------------------
+    # CONSULTA DE HISTORIA
+    # --------------------------------------------------
+
+    async def open_history_consultation(self):
+        """
+        Ingresa a CONSULTA DE HISTORIA.
+        """
+
+        frame_contenido = self.get_frame("contenido")
+
+        consulta_historia = frame_contenido.get_by_text(
+            "CONSULTA DE HISTORIA", exact=True
+        )
+
+        await consulta_historia.wait_for(state="visible")
+
+        await consulta_historia.click()
+
+        print("Clic en CONSULTA DE HISTORIA realizado")
+
+        # Esperar a que cambie el contenido del módulo.
+        await frame_contenido.wait_for_load_state("domcontentloaded", timeout=30000)
+
+        print("URL después de ingresar:", frame_contenido.url)
+
+        return frame_contenido
+
+    # --------------------------------------------------
+    # BUSCAR PACIENTE
+    # --------------------------------------------------
+
+    async def search_patient(
+        self,
+        document: str,
+        type_document: str,
+        date: str,
+        numero_ingreso: int,
+        numero_folio: int,
+        output_dir: Path,
+    ) -> list[Path]:
+        """
+        Busca un paciente por documento, tipo de documento
+        y fecha de inicio.
+        """
+
+        # 1. Navegar a RESUMEN
+        frame_contenido = await self.open_summary()
+
+        # 2. Entrar a CONSULTA DE HISTORIA
+        await self.open_history_consultation()
+
+        # 3. Obtener nuevamente el frame
+        frame_contenido = self.get_frame("contenido")
+
+        # 4. Localizar los campos
+        campo_documento = frame_contenido.locator("#vHISCKEY")
+        campo_tipo_documento = frame_contenido.locator("#vFHISTIPDOC")
+        campo_fecha = frame_contenido.locator("#vFINI")
+        boton_actualizar = frame_contenido.locator("#BTNACTUALIZAR")
+
+        # 5. Esperar a que el formulario esté disponible
+        await campo_documento.wait_for(state="visible", timeout=15000)
+
+        await campo_tipo_documento.wait_for(state="visible", timeout=15000)
+
+        await campo_fecha.wait_for(state="visible", timeout=15000)
+
+        # 6. Ingresar documento
+        await campo_documento.fill(document)
+
+        # 7. Seleccionar tipo de documento
+        await campo_tipo_documento.select_option(type_document)
+
+        # 8. Ingresar fecha de inicio
+        await campo_fecha.fill(date)
+
+        # 9. Ejecutar búsqueda
+        await boton_actualizar.wait_for(state="visible", timeout=15000)
+
+        await boton_actualizar.click()
+
+        print("Búsqueda del paciente ejecutada correctamente")
+
+        # 10. Esperar resultados
+        filas = frame_contenido.locator(
+            "#GridContainerTbl tbody tr[id^='GridContainerRow_']"
+        )
+
+        try:
+            await filas.first.wait_for(state="visible", timeout=20000)
+        except PlaywrightTimeoutError:
+            raise Exception("No aparecieron resultados para el paciente consultado")
+
+        # 11. Buscar el número de ingreso
+        cantidad_filas = await filas.count()
+
+        for i in range(cantidad_filas):
+
+            fila = filas.nth(i)
+
+            ingreso_elemento = fila.locator("[id^='span_vINGCSCG_']")
+
+            ingreso = (await ingreso_elemento.inner_text()).strip()
+
+            if ingreso == str(numero_ingreso):
+
+                print(f"Ingreso encontrado: {ingreso}")
+
+                boton_confirmar = fila.locator('input[title="Confirmar"]')
+
+                await boton_confirmar.click()
+
+                print("Ingreso seleccionado correctamente")
+
+                await self.configure_folio_range(numero_folio)
+
+                historia = await self.download_document(
+                    output_dir / f"{document}_{numero_ingreso}_{numero_folio}.pdf"
+                )
+                incapacidades = await self.download_incapacities(
+                    document, numero_ingreso, date, output_dir
+                )
+                formulaciones = await self.download_prescriptions(
+                    document, numero_ingreso, output_dir
+                )
+                
+                ordenes = await self.download_medical_orders(
+                    document, numero_ingreso, numero_folio, output_dir
+                )
+
+                return [historia, *incapacidades, *formulaciones, *ordenes]
+
+        raise Exception(f"No se encontró el ingreso número {numero_ingreso}")
+
+    async def download_document(
+        self, output_path: Path, popup_id: str = "gxp1"
+    ) -> Path:
+        frame_contenido = self.get_frame("contenido")
+
+        popup = frame_contenido.locator(f"#{popup_id}_b")
+        await popup.wait_for(state="visible", timeout=60000)
+        print("Ventana del PDF abierta")
+
+        iframe = frame_contenido.locator(f"#{popup_id}_ifrm")
+        await iframe.wait_for(state="attached", timeout=30000)
+
+        src = await iframe.get_attribute("src")
+        if not src:
+            raise Exception("El iframe del PDF no tiene src")
+
+        pdf_url = urljoin(frame_contenido.url, src)
+
+        response = await self.page.context.request.get(pdf_url, timeout=60000)
+        if not response.ok:
+            raise Exception(f"Error al descargar el PDF: HTTP {response.status}")
+
+        body = await response.body()
+        if not body.startswith(b"%PDF"):
+            raise Exception("La respuesta no es un PDF válido")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(body)
+        print(f"PDF guardado en: {output_path}")
+
+        await frame_contenido.locator(f"#{popup_id}_cls").click()
+        await popup.wait_for(state="hidden", timeout=15000)
+        print("Ventana del PDF cerrada")
+
+        return output_path
+
+    async def download_incapacities(
+        self, document: str, numero_ingreso: int, date: str, output_dir: Path
+    ) -> list[Path]:
+        """
+        Selecciona CERTIFICADOS MÉDICOS IESS, filtra por fecha y descarga
+        todas las incapacidades de la tabla. Formato de fecha: dd/mm/yyyy.
+        """
+        frame_contenido = self.get_frame("contenido")
+        popup_frame = frame_contenido.frame_locator("#gxp0_ifrm")
+
+        # 1. Seleccionar CERTIFICADOS MÉDICOS IESS
+        rango = popup_frame.locator("#vRANGO")
+        await rango.wait_for(state="visible", timeout=20000)
+        await rango.select_option("13")
+        print("Opción CERTIFICADOS MÉDICOS IESS seleccionada")
+
+        # 2. Esperar los campos de fecha
+        fecha_ini = popup_frame.locator("#W0241vFCHINIINC")
+        fecha_fin = popup_frame.locator("#W0241vFCHFININC")
+
+        await fecha_ini.wait_for(state="visible", timeout=20000)
+        await fecha_fin.wait_for(state="visible", timeout=20000)
+
+        # 3. Escribir las fechas (press_sequentially respeta la máscara/validación)
+        for campo in (fecha_ini, fecha_fin):
+            await campo.click()
+            await campo.press_sequentially(date, delay=50)
+            await campo.press("Tab")
+
+        # 4. Actualizar
+        boton = popup_frame.locator("#W0241BTNACTUALIZAINC")
+        await boton.wait_for(state="visible", timeout=15000)
+        await boton.click()
+
+        # 5. Esperar la tabla; si no hay filas, no tiene incapacidades
+        filas = popup_frame.locator(
+            "#W0241IncpacgContainerTbl tr[id^='W0241IncpacgContainerRow_']"
+        )
+
+        try:
+            await filas.first.wait_for(state="visible", timeout=10000)
+        except PlaywrightTimeoutError:
+            print("El paciente no tiene incapacidades")
+            return []
+
+        cantidad = await filas.count()
+        print(f"Incapacidades encontradas: {cantidad}")
+
+        # 6. Descargar cada una
+        archivos = []
+
+        for i in range(cantidad):
+            fila = filas.nth(i)
+
+            consecutivo = (
+                await fila.locator("[id^='span_W0241vINCCONPAC_']").inner_text()
+            ).strip()
+
+            await fila.locator('input[title="Imprimir"]').click()
+
+            ruta = output_dir / f"{document}_{numero_ingreso}_INC_{consecutivo}.pdf"
+            archivos.append(await self.download_document(ruta, popup_id="gxp1"))
+
+        return archivos
+
+    async def download_prescriptions(
+        self, document: str, numero_ingreso: int, output_dir: Path
+    ) -> list[Path]:
+        """
+        Selecciona PRESCRIPCION y descarga todas las formulaciones de la tabla.
+        """
+        frame_contenido = self.get_frame("contenido")
+        popup_frame = frame_contenido.frame_locator("#gxp0_ifrm")
+
+        # 1. Seleccionar PRESCRIPCION
+        rango = popup_frame.locator("#vRANGO")
+        await rango.wait_for(state="visible", timeout=20000)
+        await rango.select_option("15")
+        print("Opción PRESCRIPCION seleccionada")
+
+        # 2. Esperar la tabla; si no hay filas, no hay formulaciones
+        filas = popup_frame.locator(
+            "#W0241FormulaContainerTbl tr[id^='W0241FormulaContainerRow_']"
+        )
+
+        try:
+            await filas.first.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            print("El paciente no tiene formulaciones")
+            return []
+
+        cantidad = await filas.count()
+        print(f"Formulaciones encontradas: {cantidad}")
+
+        # 3. Descargar cada una
+        archivos = []
+
+        for i in range(cantidad):
+            fila = filas.nth(i)
+
+            folio = (
+                await fila.locator("[id^='span_W0241CTLHISCSEC_']").inner_text()
+            ).strip()
+
+            await fila.locator('input[title="Imprimir"]').click()
+
+            ruta = output_dir / f"{document}_{numero_ingreso}_FORM_{folio}.pdf"
+            archivos.append(await self.download_document(ruta, popup_id="gxp1"))
+
+        return archivos
+
+    async def download_medical_orders(
+        self,
+        document: str,
+        numero_ingreso: int,
+        numero_folio: int,
+        output_dir: Path,
+        option_value: str = "16",  
+    ) -> list[Path]:
+        """
+        Selecciona la opción de órdenes médicas, actualiza y descarga
+        las filas cuyo folio coincide con numero_folio.
+        """
+        frame_contenido = self.get_frame("contenido")
+        popup_frame = frame_contenido.frame_locator("#gxp0_ifrm")
+
+        # 1. Seleccionar la opción
+        rango = popup_frame.locator("#vRANGO")
+        await rango.wait_for(state="visible", timeout=20000)
+        await rango.select_option(option_value)
+        print("Opción de órdenes médicas seleccionada")
+
+        filas = popup_frame.locator(
+            "#W0241FormulaContainerTbl tr[id^='W0241FormulaContainerRow_']"
+        )
+
+        # 2. Guardar la primera fila anterior (si hay) para detectar el refresco
+        fila_previa = None
+        if await filas.count() > 0:
+            fila_previa = await filas.first.element_handle()
+
+        # 3. Actualizar
+        boton = popup_frame.locator("#W0241ACTUALIZA")
+        await boton.wait_for(state="visible", timeout=15000)
+        await boton.click()
+
+        # 4. Esperar a que la tabla se recargue (las filas viejas desaparecen)
+        if fila_previa is not None:
+            try:
+                await fila_previa.wait_for_element_state("hidden", timeout=10000)
+            except PlaywrightTimeoutError:
+                pass  # la tabla pudo actualizarse sin reemplazar la fila
+
+        try:
+            await filas.first.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            print("El paciente no tiene órdenes médicas")
+            return []
+
+        # 5. Filtrar por folio
+        cantidad = await filas.count()
+        coincidentes = []
+
+        for i in range(cantidad):
+            folio = (
+                await filas.nth(i).locator("[id^='span_W0241CTLHISCSEC_']").inner_text()
+            ).strip()
+
+            if folio == str(numero_folio):
+                coincidentes.append((i, folio))
+
+        if not coincidentes:
+            print(f"No hay órdenes médicas para el folio {numero_folio}")
+            return []
+
+        print(
+            f"Órdenes médicas encontradas para el folio {numero_folio}: {len(coincidentes)}"
+        )
+
+        # 6. Descargar cada una
+        archivos = []
+
+        for n, (i, folio) in enumerate(coincidentes, start=1):
+            await filas.nth(i).locator('input[title="Imprimir"]').click()
+
+            ruta = output_dir / f"{document}_{numero_ingreso}_ORD_{folio}_{n}.pdf"
+            archivos.append(await self.download_document(ruta, popup_id="gxp1"))
+
+        return archivos
+
+    async def configure_folio_range(self, numero_folio: int):
+        """
+        Configura el rango de folios para imprimir la historia clínica.
+        """
+        frame_contenido = self.get_frame("contenido")
+
+        # 1. Esperar a que aparezca la ventana emergente
+        popup = frame_contenido.locator("#gxp0_b")
+
+        await popup.wait_for(state="visible", timeout=30000)
+
+        print("Ventana Rango de Impresión Historia Clínica abierta")
+
+        # 2. Acceder al iframe interno del popup
+        popup_frame = frame_contenido.frame_locator("#gxp0_ifrm")
+
+        # 3. Esperar a que cargue el formulario
+        rango = popup_frame.locator("#vRANGO")
+
+        await rango.wait_for(state="visible", timeout=20000)
+
+        print("Formulario de impresión cargado")
+
+        # 4. Seleccionar RANGO DE FOLIOS
+        await rango.select_option("2")
+
+        print("Rango de folios seleccionado")
+
+        # 5. Esperar los campos Desde y Hasta
+        folio_desde = popup_frame.locator("#vFOLINI")
+        folio_hasta = popup_frame.locator("#vFOLFIN")
+
+        await folio_desde.wait_for(state="visible", timeout=15000)
+
+        await folio_hasta.wait_for(state="visible", timeout=15000)
+
+        # 6. Introducir el mismo folio en ambos campos
+        folio = str(numero_folio)
+
+        await folio_desde.fill(folio)
+        await folio_hasta.fill(folio)
+
+        print(f"Folio configurado: {folio} - {folio}")
+
+        # 7. Confirmar
+        boton_confirmar = popup_frame.locator("#BTNCONFIRMAR")
+
+        await boton_confirmar.wait_for(state="visible", timeout=15000)
+
+        await boton_confirmar.click()
+
+        print("Rango de folios confirmado correctamente")
