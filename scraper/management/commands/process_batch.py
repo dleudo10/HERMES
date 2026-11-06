@@ -2,20 +2,23 @@ import asyncio
 import os
 from django.core.management.base import BaseCommand, CommandError
 from ...main import main
-from ...mails.config import MailConfig
-from ...mails.delivery_service import DeliveryService
 
 
 class Command(BaseCommand):
-    help = "Procesa el lote de historias clínicas"
-    
+    help = "Procesa el lote de historias clínicas: descarga los documentos y envía los correos"
+
     def add_arguments(self, parser):
         parser.add_argument(
             "file",
             type=str,
             help="Ruta del archivo Excel"
         )
-    
+        parser.add_argument(
+            "--no-mail",
+            action="store_true",
+            help="Solo descarga los documentos, sin enviar correos",
+        )
+
     def handle(self, *args, **options):
         file = options["file"]
 
@@ -32,4 +35,4 @@ class Command(BaseCommand):
         )
 
         # Ejecutar el procesamiento
-        asyncio.run(main(file))
+        asyncio.run(main(file, send_mail=not options["no_mail"]))

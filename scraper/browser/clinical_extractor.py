@@ -127,9 +127,7 @@ class ClinicalExtractor:
             raise ValueError("Los campos de autenticación tienen valores incorrectos")
 
         # Ingresar
-        boton = self.page.locator(
-            'input[type="button"][value="Ingresar"]'
-        )
+        boton = self.page.locator('input[type="button"][value="Ingresar"]')
 
         await boton.click()
 
@@ -208,114 +206,6 @@ class ClinicalExtractor:
     # BUSCAR PACIENTE
     # --------------------------------------------------
 
-    # async def search_patient(
-    #     self,
-    #     document: str,
-    #     type_document: str,
-    #     date: str,
-    #     numero_ingreso: str,
-    #     numero_folio: str,
-    #     output_dir: Path,
-    # ) -> list[DocumentResult]:
-    #     """
-    #     Busca al paciente, selecciona el ingreso y descarga cada tipo de
-    #     documento de forma independiente.
-
-    #     Devuelve siempre un DocumentResult por tipo (descargado, no encontrado
-    #     o con error). Lanza PatientNotFoundError si no hay resultados o no
-    #     existe el ingreso, y cualquier otra excepción si falla la navegación
-    #     previa a la descarga.
-    #     """
-
-    #     # 1. Navegar a RESUMEN
-    #     frame_contenido = await self.open_summary()
-
-    #     # 2. Entrar a CONSULTA DE HISTORIA
-    #     await self.open_history_consultation()
-
-    #     # 3. Obtener nuevamente el frame
-    #     frame_contenido = self.get_frame("contenido")
-
-    #     # 4. Localizar los campos
-    #     campo_documento = frame_contenido.locator("#vHISCKEY")
-    #     campo_tipo_documento = frame_contenido.locator("#vFHISTIPDOC")
-    #     campo_fecha = frame_contenido.locator("#vFINI")
-    #     boton_actualizar = frame_contenido.locator("#BTNACTUALIZAR")
-
-    #     # 5. Esperar a que el formulario esté disponible
-    #     await campo_documento.wait_for(state="visible", timeout=15000)
-
-    #     await campo_tipo_documento.wait_for(state="visible", timeout=15000)
-
-    #     await campo_fecha.wait_for(state="visible", timeout=15000)
-
-    #     # 6. Ingresar documento
-    #     await campo_documento.fill(document)
-
-    #     # 7. Seleccionar tipo de documento
-    #     await campo_tipo_documento.select_option(type_document)
-
-    #     # 8. Ingresar fecha de inicio
-    #     await campo_fecha.fill(date)
-
-    #     # 9. Ejecutar búsqueda
-    #     await boton_actualizar.wait_for(state="visible", timeout=15000)
-
-    #     await boton_actualizar.click()
-
-    #     print("Búsqueda del paciente ejecutada correctamente")
-
-    #     # 10. Esperar resultados
-    #     filas = frame_contenido.locator(
-    #         "#GridContainerTbl tbody tr[id^='GridContainerRow_']"
-    #     )
-
-    #     try:
-    #         await filas.first.wait_for(state="visible", timeout=20000)
-    #     except PlaywrightTimeoutError:
-    #         raise Exception("No aparecieron resultados para el paciente consultado")
-
-    #     # 11. Buscar el número de ingreso
-    #     cantidad_filas = await filas.count()
-
-    #     for i in range(cantidad_filas):
-
-    #         fila = filas.nth(i)
-
-    #         ingreso_elemento = fila.locator("[id^='span_vINGCSCG_']")
-
-    #         ingreso = (await ingreso_elemento.inner_text()).strip()
-
-    #         if ingreso == str(numero_ingreso):
-
-    #             print(f"Ingreso encontrado: {ingreso}")
-
-    #             boton_confirmar = fila.locator('input[title="Confirmar"]')
-
-    #             await boton_confirmar.click()
-
-    #             print("Ingreso seleccionado correctamente")
-
-    #             await self.configure_folio_range(numero_folio)
-
-    #             historia = await self.download_document(
-    #                 output_dir / f"{document}_{numero_ingreso}_{numero_folio}.pdf"
-    #             )
-    #             incapacidades = await self.download_incapacities(
-    #                 document, numero_ingreso, date, output_dir
-    #             )
-    #             formulaciones = await self.download_prescriptions(
-    #                 document, numero_ingreso, output_dir
-    #             )
-                
-    #             ordenes = await self.download_medical_orders(
-    #                 document, numero_ingreso, numero_folio, output_dir
-    #             )
-
-    #             return [historia, *incapacidades, *formulaciones, *ordenes]
-
-    #     raise Exception(f"No se encontró el ingreso número {numero_ingreso}")
-    
     async def search_patient(
         self,
         document: str,
@@ -671,74 +561,102 @@ class ClinicalExtractor:
         numero_ingreso: int,
         numero_folio: int,
         output_dir: Path,
-        option_value: str = "16",  
+        option_value: str = "16",
+        tipo_procedimiento: str = "98",  # 98 = TODOS
     ) -> list[Path]:
         """
-        Selecciona la opción de órdenes médicas, actualiza y descarga
-        las filas cuyo folio coincide con numero_folio.
+        Selecciona órdenes médicas, deja el tipo de procedimiento en TODOS,
+        actualiza la tabla y descarga todas las órdenes del ingreso del paciente.
         """
         frame_contenido = self.get_frame("contenido")
         popup_frame = frame_contenido.frame_locator("#gxp0_ifrm")
 
-        # 1. Seleccionar la opción
+        # 1. Seleccionar la opción de órdenes médicas
         rango = popup_frame.locator("#vRANGO")
         await rango.wait_for(state="visible", timeout=20000)
         await rango.select_option(option_value)
         print("Opción de órdenes médicas seleccionada")
+        await self.wait_for_grid()
 
+        # 2. Tipo de procedimiento: TODOS. Aparece al elegir órdenes médicas y
+        #    suele venir seleccionado, pero se verifica igualmente.
+        tipo = popup_frame.locator("#W0241vTIPPRC")
+        await tipo.wait_for(state="visible", timeout=15000)
+
+        if await tipo.input_value() != tipo_procedimiento:
+            await tipo.select_option(tipo_procedimiento)
+            await self.wait_for_grid()
+
+            if await tipo.input_value() != tipo_procedimiento:
+                raise Exception(
+                    "No se pudo dejar el tipo de procedimiento en TODOS"
+                )
+
+        print("Tipo de procedimiento: TODOS")
+
+        # 3. Actualizar la tabla
+        boton = popup_frame.locator('input[name="W0241ACTUALIZA"]')
+        await boton.wait_for(state="visible", timeout=15000)
+        await boton.click()
+        await self.wait_for_grid()
+
+        # 4. Esperar filas de ÓRDENES (las que tienen "Tipo de Procedimiento").
+        #    Esperar solo "una fila" podría aceptar filas viejas de otra tabla
+        #    y dar un falso "no tiene órdenes".
         filas = popup_frame.locator(
             "#W0241FormulaContainerTbl tr[id^='W0241FormulaContainerRow_']"
         )
-
-        # 2. Guardar la primera fila anterior (si hay) para detectar el refresco
-        fila_previa = None
-        if await filas.count() > 0:
-            fila_previa = await filas.first.element_handle()
-
-        # 3. Actualizar
-        boton = popup_frame.locator("#W0241ACTUALIZA")
-        await boton.wait_for(state="visible", timeout=15000)
-        await boton.click()
-
-        # 4. Esperar a que la tabla se recargue (las filas viejas desaparecen)
-        if fila_previa is not None:
-            try:
-                await fila_previa.wait_for_element_state("hidden", timeout=10000)
-            except PlaywrightTimeoutError:
-                pass  # la tabla pudo actualizarse sin reemplazar la fila
-
-        await self.wait_for_grid()
+        celdas_tipo = popup_frame.locator(
+            "#W0241FormulaContainerTbl [id^='span_W0241CTLHCPRCTIP_']"
+        )
 
         try:
-            await filas.first.wait_for(state="visible", timeout=15000)
+            await celdas_tipo.first.wait_for(state="visible", timeout=15000)
         except PlaywrightTimeoutError:
             raise DocumentNotFoundError("El paciente no tiene órdenes médicas")
 
-        # 5. Filtrar por folio
+        # 5. Filtrar por ingreso: todas las órdenes del ingreso del paciente
+        ingreso_buscado = str(numero_ingreso).strip().lstrip("0")
         cantidad = await filas.count()
         coincidentes = []
 
         for i in range(cantidad):
-            folio = (
-                await filas.nth(i).locator("[id^='span_W0241CTLHISCSEC_']").inner_text()
-            ).strip()
+            fila = filas.nth(i)
 
-            if folio == str(numero_folio):
-                coincidentes.append((i, folio))
+            tipo_elemento = fila.locator("[id^='span_W0241CTLHCPRCTIP_']")
+
+            if await tipo_elemento.count() == 0:
+                continue
+
+            ingreso = (
+                await fila.locator("[id^='span_W0241CTLHCTVIN51_']").inner_text()
+            ).strip().lstrip("0")
+
+            if ingreso != ingreso_buscado:
+                continue
+
+            folio = (
+                await fila.locator("[id^='span_W0241CTLHISCSEC_']").inner_text()
+            ).strip()
+            tipo_procedimiento_fila = (await tipo_elemento.inner_text()).strip()
+
+            coincidentes.append((i, folio, tipo_procedimiento_fila))
 
         if not coincidentes:
             raise DocumentNotFoundError(
-                f"No hay órdenes médicas para el folio {numero_folio}"
+                f"No hay órdenes médicas para el ingreso {numero_ingreso}"
             )
 
         print(
-            f"Órdenes médicas encontradas para el folio {numero_folio}: {len(coincidentes)}"
+            f"Órdenes médicas encontradas para el ingreso {numero_ingreso}: {len(coincidentes)}"
         )
 
         # 6. Descargar cada una
         archivos = []
 
-        for n, (i, folio) in enumerate(coincidentes, start=1):
+        for n, (i, folio, nombre_tipo) in enumerate(coincidentes, start=1):
+            print(f"Orden {n}/{len(coincidentes)}: {nombre_tipo} (folio {folio})")
+
             await filas.nth(i).locator('input[title="Imprimir"]').click()
 
             ruta = output_dir / f"{document}_{numero_ingreso}_ORD_{folio}_{n}.pdf"

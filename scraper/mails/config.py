@@ -14,6 +14,8 @@ class MailConfig:
     encrypt_pdfs: bool = True
     max_retries: int = 4
     timeout: float = 60
+    delay_seconds: float = 2.0      # pausa entre correos (Exchange Online ~30 correos/min por buzón)
+    test_recipient: str = ""       # si se define, TODO se envía a este correo y no se guarda como enviado
     subject: str = "Historia clínica - {fecha}"
     body_html: str = (
         '<meta name="color-scheme" content="light dark">'
@@ -74,6 +76,8 @@ class MailConfig:
             client_secret=os.environ.get("GRAPH_CLIENT_SECRET", ""),
             dry_run=os.environ.get("HERMES_MAIL_DRY_RUN", "1") == "1",
             encrypt_pdfs=os.environ.get("HERMES_ENCRYPT_PDFS", "1") == "1",
+            delay_seconds=float(os.environ.get("HERMES_MAIL_DELAY", "2")),
+            test_recipient=os.environ.get("HERMES_MAIL_TEST_TO", "").strip(),
         )
 
     def validate(self) -> None:

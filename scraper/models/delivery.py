@@ -1,28 +1,37 @@
 from django.db import models
-from .document import Document
+from .extraction import Extraction
 
 class DeliveryStatus(models.TextChoices):
     PENDING = "PENDING", "Pendiente"
     PROCESSING = "PROCESSING", "Procesando"
     SENT = "SENT", "Enviado"
     FAILED = "FAILED", "Fallido"
+    UNCERTAIN = "UNCERTAIN", "Incierto (verificar en Enviados)"
     CANCELLED = "CANCELLED", "Cancelado"
 
 
 class Delivery(models.Model):
+    """
+    Un correo por extracción (un ingreso), con todos sus PDFs adjuntos.
+    """
+
+    MAX_ATTEMPTS = 3
+
     id = models.BigAutoField(primary_key=True)
 
-    document = models.ForeignKey(
-        Document, on_delete=models.CASCADE, related_name="deliveries"
+    extraction = models.OneToOneField(
+        Extraction, on_delete=models.CASCADE, related_name="delivery"
     )
 
-    recipient_email = models.EmailField(max_length=254)
+    recipient_email = models.EmailField(max_length=254, blank=True, default="")
 
     status = models.CharField(
         max_length=20, choices=DeliveryStatus.choices, default=DeliveryStatus.PENDING
     )
 
     attempts = models.PositiveIntegerField(default=0)
+
+    attachments_count = models.PositiveIntegerField(default=0)
 
     # Fechas del proceso de entrega
     created_at = models.DateTimeField(auto_now_add=True)
@@ -36,7 +45,7 @@ class Delivery(models.Model):
 
     error_message = models.TextField(null=True, blank=True)
 
-    # Identificador del proveedor de correo
+    # Identificador del proveedor de correo (request-id de Graph)
     provider_message_id = models.CharField(max_length=255, null=True, blank=True)
 
     class Meta:
