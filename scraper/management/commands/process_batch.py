@@ -2,6 +2,8 @@ import asyncio
 import os
 from django.core.management.base import BaseCommand, CommandError
 from ...main import main
+from ...mails.config import MailConfig
+from ...mails.delivery_service import DeliveryService
 
 
 class Command(BaseCommand):
