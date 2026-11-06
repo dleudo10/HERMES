@@ -9,9 +9,21 @@ class DocumentType(models.TextChoices):
     MEDICAL_ORDERS = "MEDICAL_ORDERS", "Órdenes médicas"
 
 
+class DocumentStatus(models.TextChoices):
+    DOWNLOADED = "DOWNLOADED", "Descargado"
+    NOT_FOUND = "NOT_FOUND", "No encontrado"
+    FAILED = "FAILED", "Error al descargar"
+
+
 class Document(models.Model):
     """
-    Almacena los metadatos y la ubicación de cada documento descargado.
+    Resultado de cada tipo de documento para una extracción.
+
+    - DOWNLOADED: una fila por archivo descargado (un paciente puede tener
+      varias incapacidades, formulaciones u órdenes del mismo tipo).
+    - NOT_FOUND: el sistema no tiene ese documento para el paciente.
+      El motivo queda en `message`.
+    - FAILED: hubo un error técnico al intentar descargarlo.
     """
 
     extraction = models.ForeignKey(
@@ -20,18 +32,26 @@ class Document(models.Model):
         related_name="documents",
     )
 
-    original_filename = models.CharField(max_length=250)
-
-    file_path = models.CharField(max_length=500)
-
-    mime_type = models.CharField(max_length=100)
-
-    file_size = models.PositiveBigIntegerField(default=0)
-
     type_document = models.CharField(
         max_length=50,
         choices=DocumentType.choices,
     )
+
+    status = models.CharField(
+        max_length=20,
+        choices=DocumentStatus.choices,
+        default=DocumentStatus.DOWNLOADED,
+    )
+
+    message = models.TextField(null=True, blank=True)
+
+    original_filename = models.CharField(max_length=250, blank=True, default="")
+
+    file_path = models.CharField(max_length=500, blank=True, default="")
+
+    mime_type = models.CharField(max_length=100, blank=True, default="")
+
+    file_size = models.PositiveBigIntegerField(default=0)
 
     downloaded_at = models.DateTimeField(null=True, blank=True)
 
@@ -39,13 +59,13 @@ class Document(models.Model):
 
     class Meta:
         db_table = "document"
-        ordering = ["-id"]
-        constraints = [
-            models.UniqueConstraint(
+        ordering = ["id"]
+        indexes = [
+            models.Index(
                 fields=["extraction", "type_document"],
-                name="unique_extraction_document_type",
-            )
+                name="idx_document_extraction_type",
+            ),
         ]
 
     def __str__(self):
-        return self.original_filename
+        return self.original_filename or f"{self.type_document} - {self.status}"

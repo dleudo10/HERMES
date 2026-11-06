@@ -1,3 +1,4 @@
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin
 from playwright.async_api import (
@@ -5,6 +6,26 @@ from playwright.async_api import (
     Frame,
     TimeoutError as PlaywrightTimeoutError,
 )
+
+from ..models.document import DocumentStatus, DocumentType
+
+
+class PatientNotFoundError(Exception):
+    """No hay resultados para el paciente o no existe el ingreso indicado."""
+
+
+class DocumentNotFoundError(Exception):
+    """El sistema no tiene documentos de este tipo para el paciente."""
+
+
+@dataclass
+class DocumentResult:
+    """Resultado de intentar descargar un tipo de documento."""
+
+    type_document: str
+    status: str = DocumentStatus.FAILED
+    files: list[Path] = field(default_factory=list)
+    message: str | None = None
 
 
 class ClinicalExtractor:
@@ -187,22 +208,135 @@ class ClinicalExtractor:
     # BUSCAR PACIENTE
     # --------------------------------------------------
 
+    # async def search_patient(
+    #     self,
+    #     document: str,
+    #     type_document: str,
+    #     date: str,
+    #     numero_ingreso: str,
+    #     numero_folio: str,
+    #     output_dir: Path,
+    # ) -> list[DocumentResult]:
+    #     """
+    #     Busca al paciente, selecciona el ingreso y descarga cada tipo de
+    #     documento de forma independiente.
+
+    #     Devuelve siempre un DocumentResult por tipo (descargado, no encontrado
+    #     o con error). Lanza PatientNotFoundError si no hay resultados o no
+    #     existe el ingreso, y cualquier otra excepción si falla la navegación
+    #     previa a la descarga.
+    #     """
+
+    #     # 1. Navegar a RESUMEN
+    #     frame_contenido = await self.open_summary()
+
+    #     # 2. Entrar a CONSULTA DE HISTORIA
+    #     await self.open_history_consultation()
+
+    #     # 3. Obtener nuevamente el frame
+    #     frame_contenido = self.get_frame("contenido")
+
+    #     # 4. Localizar los campos
+    #     campo_documento = frame_contenido.locator("#vHISCKEY")
+    #     campo_tipo_documento = frame_contenido.locator("#vFHISTIPDOC")
+    #     campo_fecha = frame_contenido.locator("#vFINI")
+    #     boton_actualizar = frame_contenido.locator("#BTNACTUALIZAR")
+
+    #     # 5. Esperar a que el formulario esté disponible
+    #     await campo_documento.wait_for(state="visible", timeout=15000)
+
+    #     await campo_tipo_documento.wait_for(state="visible", timeout=15000)
+
+    #     await campo_fecha.wait_for(state="visible", timeout=15000)
+
+    #     # 6. Ingresar documento
+    #     await campo_documento.fill(document)
+
+    #     # 7. Seleccionar tipo de documento
+    #     await campo_tipo_documento.select_option(type_document)
+
+    #     # 8. Ingresar fecha de inicio
+    #     await campo_fecha.fill(date)
+
+    #     # 9. Ejecutar búsqueda
+    #     await boton_actualizar.wait_for(state="visible", timeout=15000)
+
+    #     await boton_actualizar.click()
+
+    #     print("Búsqueda del paciente ejecutada correctamente")
+
+    #     # 10. Esperar resultados
+    #     filas = frame_contenido.locator(
+    #         "#GridContainerTbl tbody tr[id^='GridContainerRow_']"
+    #     )
+
+    #     try:
+    #         await filas.first.wait_for(state="visible", timeout=20000)
+    #     except PlaywrightTimeoutError:
+    #         raise Exception("No aparecieron resultados para el paciente consultado")
+
+    #     # 11. Buscar el número de ingreso
+    #     cantidad_filas = await filas.count()
+
+    #     for i in range(cantidad_filas):
+
+    #         fila = filas.nth(i)
+
+    #         ingreso_elemento = fila.locator("[id^='span_vINGCSCG_']")
+
+    #         ingreso = (await ingreso_elemento.inner_text()).strip()
+
+    #         if ingreso == str(numero_ingreso):
+
+    #             print(f"Ingreso encontrado: {ingreso}")
+
+    #             boton_confirmar = fila.locator('input[title="Confirmar"]')
+
+    #             await boton_confirmar.click()
+
+    #             print("Ingreso seleccionado correctamente")
+
+    #             await self.configure_folio_range(numero_folio)
+
+    #             historia = await self.download_document(
+    #                 output_dir / f"{document}_{numero_ingreso}_{numero_folio}.pdf"
+    #             )
+    #             incapacidades = await self.download_incapacities(
+    #                 document, numero_ingreso, date, output_dir
+    #             )
+    #             formulaciones = await self.download_prescriptions(
+    #                 document, numero_ingreso, output_dir
+    #             )
+                
+    #             ordenes = await self.download_medical_orders(
+    #                 document, numero_ingreso, numero_folio, output_dir
+    #             )
+
+    #             return [historia, *incapacidades, *formulaciones, *ordenes]
+
+    #     raise Exception(f"No se encontró el ingreso número {numero_ingreso}")
+    
     async def search_patient(
         self,
         document: str,
         type_document: str,
         date: str,
-        numero_ingreso: int,
-        numero_folio: int,
+        numero_ingreso: str,
+        numero_folio: str,
         output_dir: Path,
-    ) -> list[Path]:
+    ) -> list[DocumentResult]:
         """
-        Busca un paciente por documento, tipo de documento
-        y fecha de inicio.
+        Busca al paciente, selecciona el ingreso y descarga cada tipo de
+        documento de forma independiente.
+
+        Devuelve siempre un DocumentResult por tipo (descargado, no encontrado
+        o con error). Lanza PatientNotFoundError si no hay resultados o no
+        existe el ingreso, y cualquier otra excepción si falla la navegación
+        previa a la descarga.
         """
 
         # 1. Navegar a RESUMEN
-        frame_contenido = await self.open_summary()
+        await self.open_summary()
 
         # 2. Entrar a CONSULTA DE HISTORIA
         await self.open_history_consultation()
@@ -218,28 +352,21 @@ class ClinicalExtractor:
 
         # 5. Esperar a que el formulario esté disponible
         await campo_documento.wait_for(state="visible", timeout=15000)
-
         await campo_tipo_documento.wait_for(state="visible", timeout=15000)
-
         await campo_fecha.wait_for(state="visible", timeout=15000)
 
-        # 6. Ingresar documento
+        # 6. Ingresar documento, tipo y fecha
         await campo_documento.fill(document)
-
-        # 7. Seleccionar tipo de documento
         await campo_tipo_documento.select_option(type_document)
-
-        # 8. Ingresar fecha de inicio
         await campo_fecha.fill(date)
 
-        # 9. Ejecutar búsqueda
+        # 7. Ejecutar búsqueda
         await boton_actualizar.wait_for(state="visible", timeout=15000)
-
         await boton_actualizar.click()
 
         print("Búsqueda del paciente ejecutada correctamente")
 
-        # 10. Esperar resultados
+        # 8. Esperar resultados
         filas = frame_contenido.locator(
             "#GridContainerTbl tbody tr[id^='GridContainerRow_']"
         )
@@ -247,10 +374,13 @@ class ClinicalExtractor:
         try:
             await filas.first.wait_for(state="visible", timeout=20000)
         except PlaywrightTimeoutError:
-            raise Exception("No aparecieron resultados para el paciente consultado")
+            raise PatientNotFoundError(
+                "No aparecieron resultados para el paciente consultado"
+            )
 
-        # 11. Buscar el número de ingreso
+        # 9. Buscar el número de ingreso
         cantidad_filas = await filas.count()
+        fila_ingreso = None
 
         for i in range(cantidad_filas):
 
@@ -261,34 +391,130 @@ class ClinicalExtractor:
             ingreso = (await ingreso_elemento.inner_text()).strip()
 
             if ingreso == str(numero_ingreso):
+                fila_ingreso = fila
+                break
 
-                print(f"Ingreso encontrado: {ingreso}")
+        if fila_ingreso is None:
+            raise PatientNotFoundError(
+                f"No se encontró el ingreso número {numero_ingreso}"
+            )
 
-                boton_confirmar = fila.locator('input[title="Confirmar"]')
+        print(f"Ingreso encontrado: {numero_ingreso}")
 
-                await boton_confirmar.click()
+        await fila_ingreso.locator('input[title="Confirmar"]').click()
 
-                print("Ingreso seleccionado correctamente")
+        print("Ingreso seleccionado correctamente")
 
-                await self.configure_folio_range(numero_folio)
+        # 10. Abrir el rango de impresión (si falla, no se puede descargar nada)
+        await self.configure_folio_range(numero_folio)
 
-                historia = await self.download_document(
-                    output_dir / f"{document}_{numero_ingreso}_{numero_folio}.pdf"
-                )
-                incapacidades = await self.download_incapacities(
+        # 11. Descargar cada tipo por separado: si uno falla o no existe,
+        #     los demás se siguen intentando.
+        async def historia():
+            archivo = await self.download_document(
+                output_dir / f"{document}_{numero_ingreso}_{numero_folio}.pdf"
+            )
+            return [archivo]
+
+        return [
+            await self.run_step(DocumentType.FOLIO_RANGE, historia),
+            await self.run_step(
+                DocumentType.DISABILITIES,
+                lambda: self.download_incapacities(
                     document, numero_ingreso, date, output_dir
-                )
-                formulaciones = await self.download_prescriptions(
+                ),
+            ),
+            await self.run_step(
+                DocumentType.PRESCRIPTIONS,
+                lambda: self.download_prescriptions(
                     document, numero_ingreso, output_dir
-                )
-                
-                ordenes = await self.download_medical_orders(
+                ),
+            ),
+            await self.run_step(
+                DocumentType.MEDICAL_ORDERS,
+                lambda: self.download_medical_orders(
                     document, numero_ingreso, numero_folio, output_dir
+                ),
+            ),
+        ]
+
+    # --------------------------------------------------
+    # EJECUCIÓN AISLADA DE CADA TIPO DE DOCUMENTO
+    # --------------------------------------------------
+
+    async def run_step(self, type_document, action) -> DocumentResult:
+        """
+        Ejecuta la descarga de un tipo de documento y devuelve su resultado:
+        - DOWNLOADED: se descargó al menos un archivo.
+        - NOT_FOUND: el sistema no tiene ese documento (DocumentNotFoundError).
+        - FAILED: error técnico (timeout, PDF inválido, etc.).
+        """
+        try:
+            files = await action()
+
+            if not files:
+                return DocumentResult(
+                    type_document,
+                    DocumentStatus.NOT_FOUND,
+                    message="No se encontraron documentos de este tipo",
                 )
 
-                return [historia, *incapacidades, *formulaciones, *ordenes]
+            return DocumentResult(
+                type_document,
+                DocumentStatus.DOWNLOADED,
+                files=list(files),
+            )
 
-        raise Exception(f"No se encontró el ingreso número {numero_ingreso}")
+        except DocumentNotFoundError as error:
+
+            print(f"{type_document}: {error}")
+
+            return DocumentResult(
+                type_document,
+                DocumentStatus.NOT_FOUND,
+                message=str(error),
+            )
+
+        except Exception as error:
+
+            # Dejar la pantalla lista para el siguiente tipo de documento.
+            await self.close_pdf_popup()
+
+            detail = str(error).strip().splitlines()
+            detail = detail[0] if detail else ""
+
+            print(f"{type_document}: error -> {type(error).__name__}: {detail}")
+
+            return DocumentResult(
+                type_document,
+                DocumentStatus.FAILED,
+                message=f"{type(error).__name__}: {detail}",
+            )
+
+    async def close_pdf_popup(self, popup_id: str = "gxp1"):
+        """
+        Cierra el visor de PDF si quedó abierto tras un error.
+        """
+        try:
+            frame_contenido = self.get_frame("contenido")
+            popup = frame_contenido.locator(f"#{popup_id}_b")
+
+            if await popup.is_visible():
+                await frame_contenido.locator(f"#{popup_id}_cls").click()
+                await popup.wait_for(state="hidden", timeout=5000)
+
+        except Exception:
+            pass
+
+    async def wait_for_grid(self, timeout: int = 10000):
+        """
+        Espera a que termine la recarga de la tabla del popup, para no
+        confundir una tabla que aún está cargando con "no hay documentos".
+        """
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=timeout)
+        except PlaywrightTimeoutError:
+            pass
 
     async def download_document(
         self, output_path: Path, popup_id: str = "gxp1"
@@ -359,6 +585,7 @@ class ClinicalExtractor:
         boton = popup_frame.locator("#W0241BTNACTUALIZAINC")
         await boton.wait_for(state="visible", timeout=15000)
         await boton.click()
+        await self.wait_for_grid()
 
         # 5. Esperar la tabla; si no hay filas, no tiene incapacidades
         filas = popup_frame.locator(
@@ -368,8 +595,9 @@ class ClinicalExtractor:
         try:
             await filas.first.wait_for(state="visible", timeout=10000)
         except PlaywrightTimeoutError:
-            print("El paciente no tiene incapacidades")
-            return []
+            raise DocumentNotFoundError(
+                f"El paciente no tiene incapacidades para la fecha {date}"
+            )
 
         cantidad = await filas.count()
         print(f"Incapacidades encontradas: {cantidad}")
@@ -405,6 +633,7 @@ class ClinicalExtractor:
         await rango.wait_for(state="visible", timeout=20000)
         await rango.select_option("15")
         print("Opción PRESCRIPCION seleccionada")
+        await self.wait_for_grid()
 
         # 2. Esperar la tabla; si no hay filas, no hay formulaciones
         filas = popup_frame.locator(
@@ -414,8 +643,7 @@ class ClinicalExtractor:
         try:
             await filas.first.wait_for(state="visible", timeout=15000)
         except PlaywrightTimeoutError:
-            print("El paciente no tiene formulaciones")
-            return []
+            raise DocumentNotFoundError("El paciente no tiene formulaciones")
 
         cantidad = await filas.count()
         print(f"Formulaciones encontradas: {cantidad}")
@@ -479,11 +707,12 @@ class ClinicalExtractor:
             except PlaywrightTimeoutError:
                 pass  # la tabla pudo actualizarse sin reemplazar la fila
 
+        await self.wait_for_grid()
+
         try:
             await filas.first.wait_for(state="visible", timeout=15000)
         except PlaywrightTimeoutError:
-            print("El paciente no tiene órdenes médicas")
-            return []
+            raise DocumentNotFoundError("El paciente no tiene órdenes médicas")
 
         # 5. Filtrar por folio
         cantidad = await filas.count()
@@ -498,8 +727,9 @@ class ClinicalExtractor:
                 coincidentes.append((i, folio))
 
         if not coincidentes:
-            print(f"No hay órdenes médicas para el folio {numero_folio}")
-            return []
+            raise DocumentNotFoundError(
+                f"No hay órdenes médicas para el folio {numero_folio}"
+            )
 
         print(
             f"Órdenes médicas encontradas para el folio {numero_folio}: {len(coincidentes)}"

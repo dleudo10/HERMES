@@ -40,7 +40,7 @@ class BatchImportService:
     
     @staticmethod
     def get_existing_batch(file) -> Batch | None:
-        filename = Path(file.name).name
+        filename = Path(getattr(file, "name", file)).name
         
         return Batch.objects.filter(
             original_filename=filename
