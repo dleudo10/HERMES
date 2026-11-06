@@ -15,7 +15,7 @@ class MailConfig:
     max_retries: int = 4
     timeout: float = 60
     delay_seconds: float = 2.0      # pausa entre correos (Exchange Online ~30 correos/min por buzón)
-    test_recipient: str = ""       # si se define, TODO se envía a este correo y no se guarda como enviado
+    test_recipient: str = "sistemas@clinicantioquia.com"       # si se define, TODO se envía a este correo y no se guarda como enviado
     subject: str = "Historia clínica - {fecha}"
     body_html: str = (
         '<meta name="color-scheme" content="light dark">'
