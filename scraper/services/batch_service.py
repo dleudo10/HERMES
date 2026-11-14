@@ -25,10 +25,13 @@ class BatchImportService:
             ],
 
             especialidades=[
+                "ANESTESIOLOGIA Y REANIMACION",
                 "CIRUGIA GENERAL",
                 "CIRUGIA MAXILOFACIAL",
                 "CIRUGIA PLASTICA Y ESTETICA",
+                "CIRUGIA VASCULAR Y ANGIOLOGIA",
                 "GINECOLOGIA Y OBSTETRICIA",
+                "NEUROCIRUGIA",
                 "ORTOPEDIA Y TRAUMATOLOGIA",
                 "UROLOGIA",
             ],

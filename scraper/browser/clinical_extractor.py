@@ -53,7 +53,7 @@ class ClinicalExtractor:
 
         return frame
 
-    async def wait_for_frame(self, name: str, timeout: int = 15000) -> Frame:
+    async def wait_for_frame(self, name: str, timeout: int = 20000) -> Frame:
         """
         Espera hasta que exista un frame.
         """
