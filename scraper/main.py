@@ -20,6 +20,11 @@ async def main(file, send_mail: bool = True):
     print(f"ITEMS VALIDOS: {batch.valid_rows}")
     print(f"ITEMS INVALIDOS: {batch.invalid_rows}")
     print(f"ESTADO {batch.status}")
+    
+    stats = getattr(batch, "sync_stats", None)
+
+    if stats:
+        print(f"RE-SINCRONIZACIÓN: {stats}")
 
     # 2. DESCARGA DE DOCUMENTOS (solo si el lote tiene algo por descargar)
     results = []

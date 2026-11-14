@@ -8,7 +8,17 @@ from datetime import date, datetime
 
 from django.db import transaction
 
-from ..models import Batch, BatchPatient, BatchStatus
+from ..models import (
+    Batch,
+    BatchPatient,
+    BatchPatientChange,
+    BatchStatus,
+    ChangeKind,
+    Delivery,
+    DeliveryStatus,
+    Extraction,
+    ExtractionStatus,
+)
 from ..services.normalizer import Normalizer
 
 from .structure_config import (
@@ -513,3 +523,246 @@ class ExcelCleaner:
             return Path(self.file).name
 
         return Path(getattr(self.file, "name", "archivo.xlsx")).name
+    
+    # --------------------------------------------------
+    # 14. RE-SINCRONIZACIÓN DE UN LOTE EXISTENTE
+    # --------------------------------------------------
+
+    # Si cambia alguno de estos campos en una fila que ya se procesó,
+    # el Excel ya no describe el mismo paciente/ingreso.
+    IDENTITY_FIELDS = ("tdoc", "identificacion", "ingreso")
+
+    @transaction.atomic
+    def sync(self, batch):
+        """
+        Relee el Excel, revalida TODAS las filas (válidas e inválidas) con la
+        configuración actual y actualiza el lote existente. Cada cambio queda
+        en BatchPatientChange. Las filas se emparejan por row_number.
+        """
+
+        file_hash = self.calculate_file_hash()
+        df = self.read_excel()
+
+        if df.empty:
+            raise ValueError("El archivo Excel no contiene registros.")
+
+        columns = self.resolve_columns(df)
+
+        existing = {
+            patient.row_number: patient
+            for patient in BatchPatient.objects.filter(batch=batch)
+        }
+
+        stats = {
+            "created": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "conflicts": 0,
+            "newly_valid": 0,
+            "missing_in_file": 0,
+        }
+
+        seen = set()
+        rows_in_file = set()
+
+        for index, row in df.iterrows():
+
+            row_number = index + 2
+            rows_in_file.add(row_number)
+
+            original_data = self.get_original_data(
+                row=row,
+                columns=columns["original"],
+            )
+
+            validation_data = self.get_validation_data(
+                row=row,
+                columns=columns["validation"],
+            )
+
+            errors = self.validate_row(data=validation_data, seen=seen)
+
+            is_valid = not errors
+            message = "; ".join(errors) if errors else None
+
+            new_data = {
+                model_field: original_data.get(model_field)
+                for model_field in EXCEL_TO_MODEL.values()
+            }
+            new_data["is_valid"] = is_valid
+            new_data["validation_message"] = message
+
+            patient = existing.get(row_number)
+
+            # ---------- Fila nueva ----------
+            if patient is None:
+                patient = BatchPatient.objects.create(
+                    batch=batch,
+                    row_number=row_number,
+                    **new_data,
+                )
+
+                self._log(
+                    batch,
+                    patient,
+                    row_number,
+                    ChangeKind.CREATED,
+                    {
+                        "is_valid": {"old": None, "new": is_valid},
+                        "validation_message": {"old": None, "new": message},
+                    },
+                    file_hash,
+                )
+
+                stats["created"] += 1
+
+                if is_valid:
+                    stats["newly_valid"] += 1
+
+                continue
+
+            # ---------- Fila existente: qué cambió ----------
+            diff = {
+                field: {"old": getattr(patient, field), "new": value}
+                for field, value in new_data.items()
+                if getattr(patient, field) != value
+            }
+
+            if not diff:
+                stats["unchanged"] += 1
+                continue
+
+            reason = self._locked_reason(patient, diff)
+
+            if reason:
+                self._log_conflict(
+                    batch, patient, row_number, diff, reason, file_hash
+                )
+                stats["conflicts"] += 1
+                continue
+
+            was_valid = patient.is_valid
+
+            for field, change in diff.items():
+                setattr(patient, field, change["new"])
+
+            patient.save()
+
+            self._log(
+                batch,
+                patient,
+                row_number,
+                ChangeKind.UPDATED,
+                diff,
+                file_hash,
+            )
+
+            stats["updated"] += 1
+
+            if is_valid and not was_valid:
+                stats["newly_valid"] += 1
+
+        stats["missing_in_file"] = len(set(existing) - rows_in_file)
+
+        # ---------- Contadores y estado del lote ----------
+        patients = BatchPatient.objects.filter(batch=batch)
+
+        total = patients.count()
+        valid_count = patients.filter(is_valid=True).count()
+
+        batch.total_rows = total
+        batch.valid_rows = valid_count
+        batch.invalid_rows = total - valid_count
+
+        incomplete = (
+            patients.filter(is_valid=True)
+            .exclude(extractions__status=ExtractionStatus.COMPLETED)
+            .exists()
+        )
+
+        # Si aparecieron válidos pendientes, el lote se reabre.
+        if incomplete and batch.status in (
+            BatchStatus.COMPLETED,
+            BatchStatus.NO_VALID_ROWS,
+        ):
+            batch.status = BatchStatus.READY
+            batch.finished_at = None
+
+        batch.save(
+            update_fields=[
+                "total_rows",
+                "valid_rows",
+                "invalid_rows",
+                "status",
+                "finished_at",
+                "updated_at",
+            ]
+        )
+
+        return stats
+
+    def _locked_reason(self, patient, diff):
+        """
+        Devuelve el motivo por el que NO se debe aplicar el cambio,
+        o None si es seguro actualizar.
+        """
+
+        extraction = Extraction.objects.filter(batch_patient=patient).first()
+
+        if extraction is None:
+            return None
+
+        delivery = Delivery.objects.filter(extraction=extraction).first()
+
+        if delivery and delivery.status in (
+            DeliveryStatus.SENT,
+            DeliveryStatus.UNCERTAIN,
+        ):
+            return "Ya tiene un correo enviado o incierto: no se modifica."
+
+        if extraction.attempts > 0 and any(
+            field in diff for field in self.IDENTITY_FIELDS
+        ):
+            return "Cambió el paciente o el ingreso de una fila ya procesada."
+
+        if (
+            extraction.status == ExtractionStatus.COMPLETED
+            and diff.get("is_valid", {}).get("new") is False
+        ):
+            return "La fila ya se descargó y quedaría inválida: revisar manualmente."
+
+        return None
+
+    @staticmethod
+    def _log(batch, patient, row_number, kind, changes, file_hash, reason=""):
+        BatchPatientChange.objects.create(
+            batch=batch,
+            batch_patient=patient,
+            row_number=row_number,
+            kind=kind,
+            changes=changes,
+            reason=reason,
+            file_hash=file_hash,
+        )
+
+    @staticmethod
+    def _log_conflict(batch, patient, row_number, diff, reason, file_hash):
+        # Evita repetir el mismo conflicto en cada ejecución.
+        last = (
+            BatchPatientChange.objects.filter(batch=batch, row_number=row_number)
+            .order_by("-id")
+            .first()
+        )
+
+        if last and last.kind == ChangeKind.CONFLICT and last.changes == diff:
+            return
+
+        ExcelCleaner._log(
+            batch,
+            patient,
+            row_number,
+            ChangeKind.CONFLICT,
+            diff,
+            file_hash,
+            reason,
+        )
